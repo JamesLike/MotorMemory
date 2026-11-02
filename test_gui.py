@@ -1,0 +1,149 @@
+#!/usr/bin/env python3
+"""
+Headless smoke test for MotorMemory against sim_ioc.py.
+
+    QT_QPA_PLATFORM=offscreen python test_gui.py
+
+Requires the sim IOC to be running (./run_dev.sh --ioc).
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+import tempfile
+import time
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from PyQt5.QtCore import QTimer  # noqa: E402
+from PyQt5.QtWidgets import QApplication, QDialog, QMessageBox  # noqa: E402
+
+import table_widget  # noqa: E402
+from main_window import MainWindow  # noqa: E402
+from presets_model import PresetStore, parse_pasted_values, parse_pv_names  # noqa: E402
+from table_widget import FIRST_MOTOR_COL, LIVE_ROW, C_OK  # noqa: E402
+
+
+def spin(app, seconds):
+    end = time.time() + seconds
+    while time.time() < end:
+        app.processEvents()
+        time.sleep(0.01)
+
+
+def check(cond, msg):
+    print(("PASS " if cond else "FAIL ") + msg)
+    if not cond:
+        global failures
+        failures += 1
+
+
+failures = 0
+
+
+def main():
+    global failures
+    # --- pure model tests
+    check(parse_pv_names("SIM:MMS:01.RBV, SIM:MMS:02 SIM:MMS:01") == ["SIM:MMS:01", "SIM:MMS:02"], "parse_pv_names")
+    check(parse_pasted_values("A\t1\t2\n# c\n3, 4\n5 6") == [["A", "1", "2"], ["3", "4"], ["5", "6"]], "parse_pasted_values")
+
+    app = QApplication([])
+    tmp = tempfile.mkdtemp()
+    path = os.path.join(tmp, "presets.json")
+    store = PresetStore(path)
+    store.load()
+    win = MainWindow(store)
+    win.show()
+    tw = win.tabs.widget(0)
+
+    # add motors
+    tw.pv_edit.setText("SIM:MMS:01 SIM:MMS:02.RBV SIM:MMS:03")
+    tw._on_add_motor()
+    spin(app, 2.0)
+    check(len(tw.motors) == 3, "3 motor columns created")
+    check(all(m.connected for m in tw.motors), "all motors connected")
+    check(tw.motors[0].desc == "sim x stage" and tw.motors[0].egu == "mm", f"DESC/EGU read ({tw.motors[0].desc!r})")
+    live = tw.table.item(LIVE_ROW, FIRST_MOTOR_COL).text()
+    check(live != "" and live != "disconnected", f"LIVE cell shows readback ({live})")
+
+    # capture current (monkeypatch input dialog)
+    table_widget.QInputDialog.getText = staticmethod(lambda *a, **k: ("Home", True))
+    tw._on_capture()
+    spin(app, 0.2)
+    check(len(tw.model.presets) == 1 and tw.model.presets[0].name == "Home", "capture current created preset")
+
+    # paste values as new rows
+    app.clipboard().setText("PosA\t1.5\t-2.0\t0.25\n2.0\t2.0\t2.0")
+    tw.table.setCurrentItem(None)
+    tw._on_paste_values()
+    spin(app, 0.2)
+    check(len(tw.model.presets) == 3, "paste added 2 rows")
+    check(tw.model.presets[1].values == [1.5, -2.0, 0.25], f"pasted values parsed {tw.model.presets[1].values}")
+    check(tw.model.presets[2].name.startswith("Pasted"), "unnamed pasted row got default name")
+
+    # edit a cell by hand
+    item = tw.table.item(2, FIRST_MOTOR_COL + 2)
+    item.setText("0.5")
+    spin(app, 0.2)
+    check(tw.model.presets[1].values[2] == 0.5, "cell edit updates model")
+    item.setText("abc")
+    spin(app, 0.2)
+    check(tw.model.presets[1].values[2] == 0.5 and item.text() == "0.500", "invalid edit rejected")
+
+    # park motors away from PosA so the restore really moves them
+    for m in tw.motors:
+        m.move(0.0)
+    spin(app, 2.5)
+
+    # restore PosA (auto-accept dialog, auto-accept any QMessageBox)
+    table_widget.RestoreDialog.exec_ = lambda self: QDialog.Accepted
+    tw.table.clearSelection()
+    tw.table.selectRow(2)
+    tw._on_restore()
+    spin(app, 0.3)
+    check(any(m.moving for m in tw.motors), "motors moving after restore")
+    spin(app, 2.5)
+    rb = [m.readback for m in tw.motors]
+    check(
+        all(abs(a - b) < 0.01 for a, b in zip(rb, [1.5, -2.0, 0.5])),
+        f"motors reached PosA targets {rb}",
+    )
+    cols = [tw.table.item(2, FIRST_MOTOR_COL + i).background().color().name() for i in range(3)]
+    check(all(c == C_OK.name() for c in cols), f"restored cells coloured green {cols}")
+
+    # autosave then reload
+    spin(app, 1.0)
+    check(os.path.exists(path), "presets.json autosaved")
+    store2 = PresetStore(path)
+    store2.load()
+    check(
+        store2.tables[0].motors == ["SIM:MMS:01", "SIM:MMS:02", "SIM:MMS:03"]
+        and [p.name for p in store2.tables[0].presets] == ["Home", "PosA", "Pasted"],
+        "reloaded file matches",
+    )
+
+    # remove motor column
+    QMessageBox.question = staticmethod(lambda *a, **k: QMessageBox.Yes)
+    tw._remove_motor(FIRST_MOTOR_COL + 1)
+    spin(app, 0.2)
+    check(len(tw.motors) == 2 and all(len(p.values) == 2 for p in tw.model.presets), "remove motor column")
+
+    # delete preset
+    tw.table.clearSelection()
+    tw.table.selectRow(1)
+    tw._on_delete_preset()
+    spin(app, 0.2)
+    check([p.name for p in tw.model.presets] == ["PosA", "Pasted"], "delete preset row")
+
+    win.close()
+    spin(app, 0.3)
+    print(f"\n{failures} failure(s)")
+    QTimer.singleShot(0, app.quit)
+    app.exec_()
+    return 1 if failures else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
