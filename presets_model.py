@@ -7,6 +7,7 @@ File layout (version 1)::
      "tables": [
         {"name": "Sample stage",
          "motors": ["MFX:DG1:MMS:01", "MFX:DG1:MMS:02"],
+         "aliases": ["Sample X", null],
          "tolerance": null,
          "presets": [
             {"name": "Pos A", "values": [1.0, 2.5], "note": "", "saved": "..."}
@@ -74,15 +75,20 @@ class Table:
         motors: typing.Optional[list[str]] = None,
         presets: typing.Optional[list[Preset]] = None,
         tolerance: Number = None,
+        aliases: typing.Optional[list[typing.Optional[str]]] = None,
     ):
         self.name = name
         self.motors: list[str] = list(motors or [])
         self.presets: list[Preset] = list(presets or [])
         self.tolerance: Number = tolerance  # None => use each motor's RDBD
+        # Friendly display names, parallel to ``motors`` (None => show the PV)
+        self.aliases: list[typing.Optional[str]] = list(aliases or [])
         self._normalize()
 
     def _normalize(self) -> None:
         n = len(self.motors)
+        self.aliases = [(a or None) for a in self.aliases][:n]
+        self.aliases.extend([None] * (n - len(self.aliases)))
         for p in self.presets:
             if len(p.values) < n:
                 p.values.extend([None] * (n - len(p.values)))
@@ -95,12 +101,14 @@ class Table:
         if base in self.motors:
             return self.motors.index(base)
         self.motors.append(base)
+        self.aliases.append(None)
         for p in self.presets:
             p.values.append(None)
         return len(self.motors) - 1
 
     def remove_motor(self, index: int) -> None:
         del self.motors[index]
+        del self.aliases[index]
         for p in self.presets:
             del p.values[index]
 
@@ -108,8 +116,17 @@ class Table:
         if src == dst:
             return
         self.motors.insert(dst, self.motors.pop(src))
+        self.aliases.insert(dst, self.aliases.pop(src))
         for p in self.presets:
             p.values.insert(dst, p.values.pop(src))
+
+    def set_alias(self, index: int, alias: typing.Optional[str]) -> None:
+        alias = (alias or "").strip()
+        self.aliases[index] = alias or None
+
+    def label(self, index: int) -> str:
+        """Friendly name if set, else the PV base name."""
+        return self.aliases[index] or self.motors[index]
 
     # --------------------------------------------------------- presets
     def add_preset(self, name: str, values: typing.Iterable[Number], note="") -> Preset:
@@ -140,6 +157,7 @@ class Table:
         return {
             "name": self.name,
             "motors": self.motors,
+            "aliases": self.aliases,
             "tolerance": self.tolerance,
             "presets": [p.to_dict() for p in self.presets],
         }
@@ -151,6 +169,7 @@ class Table:
             [str(m) for m in d.get("motors", [])],
             [Preset.from_dict(p) for p in d.get("presets", [])],
             _num(d.get("tolerance")),
+            [(None if a in (None, "") else str(a)) for a in d.get("aliases", [])],
         )
 
 

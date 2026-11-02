@@ -13,8 +13,6 @@ from PyQt5.QtGui import QBrush, QColor, QFont, QKeySequence
 from PyQt5.QtWidgets import (
     QAbstractItemView,
     QApplication,
-    QDialog,
-    QDialogButtonBox,
     QDoubleSpinBox,
     QHBoxLayout,
     QHeaderView,
@@ -72,8 +70,8 @@ class TableWidget(QWidget):
         super().__init__(parent)
         self.model = table
         self.motors: list[Motor] = []
-        self._restoring: typing.Optional[int] = None  # preset index being restored
-        self._restore_targets: dict[int, float] = {}
+        # column index -> target of an in-flight move (for the yellow highlight)
+        self._move_targets: dict[int, float] = {}
         self._building = False
 
         self._build_ui()
@@ -106,7 +104,7 @@ class TableWidget(QWidget):
         self.tol_spin.setRange(0.0, 1e6)
         self.tol_spin.setSingleStep(0.001)
         self.tol_spin.setSpecialValueText("motor RDBD")
-        self.tol_spin.setToolTip("Settle tolerance used to colour cells green after a restore.\n0 = use each motor's RDBD field.")
+        self.tol_spin.setToolTip("A cell is green when |readback - value| <= tolerance.\n0 = use each motor's RDBD field.")
         self.tol_spin.setValue(self.model.tolerance or 0.0)
         self.tol_spin.valueChanged.connect(self._on_tol_changed)
         bar.addWidget(self.tol_spin)
@@ -118,6 +116,7 @@ class TableWidget(QWidget):
         self.table.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.table.setAlternatingRowColors(False)
         self.table.horizontalHeader().setSectionsClickable(True)
+        self.table.horizontalHeader().sectionDoubleClicked.connect(self._on_header_double_clicked)
         self.table.horizontalHeader().setContextMenuPolicy(Qt.CustomContextMenu)
         self.table.horizontalHeader().customContextMenuRequested.connect(self._header_menu)
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
@@ -155,10 +154,10 @@ class TableWidget(QWidget):
         self.btn_delete.clicked.connect(self._on_delete_preset)
         btns.addWidget(self.btn_delete)
         btns.addStretch(1)
-        self.btn_restore = QPushButton("Restore selected  ▶")
+        self.btn_restore = QPushButton("Move to selected  ▶")
         self.btn_restore.setStyleSheet("font-weight: bold;")
-        self.btn_restore.setToolTip("Move every motor to the selected preset (asks for confirmation)")
-        self.btn_restore.clicked.connect(self._on_restore)
+        self.btn_restore.setToolTip("Move every motor to the selected preset immediately")
+        self.btn_restore.clicked.connect(self._on_move)
         btns.addWidget(self.btn_restore)
         lay.addLayout(btns)
 
@@ -250,19 +249,22 @@ class TableWidget(QWidget):
             return
         self._update_header(m)
         self._update_live_cell(m)
-        self.status.emit(f"{m.base} {'connected' if connected else 'DISCONNECTED'}")
+        self._recolour_column(m)
+        self.status.emit(f"{self._label(m)} {'connected' if connected else 'DISCONNECTED'}")
 
     def _on_motor_rbv(self, m: Motor, value: float) -> None:
         if m not in self.motors:
             return
         self._update_live_cell(m)
-        self._update_restore_colours(m)
+        self._recolour_column(m)
 
     def _on_motor_moving(self, m: Motor, moving: bool) -> None:
         if m not in self.motors:
             return
+        if not moving:
+            self._move_targets.pop(self._motor_col(m), None)
         self._update_live_cell(m)
-        self._update_restore_colours(m)
+        self._recolour_column(m)
 
     def _on_motor_info(self, m: Motor) -> None:
         if m not in self.motors:
@@ -318,6 +320,7 @@ class TableWidget(QWidget):
             for m in self.motors:
                 self._update_header(m)
                 self._update_live_cell(m)
+                self._recolour_column(m)
             self.table.resizeColumnsToContents()
             self.table.horizontalHeader().setStretchLastSection(True)
         finally:
@@ -334,16 +337,26 @@ class TableWidget(QWidget):
         note = QTableWidgetItem(p.note)
         self.table.setItem(row, FIRST_MOTOR_COL + len(self.motors), note)
 
+    def _label(self, m: Motor) -> str:
+        return self.model.label(self.motors.index(m))
+
     def _update_header(self, m: Motor) -> None:
         col = self._motor_col(m)
+        idx = self.motors.index(m)
+        alias = self.model.aliases[idx]
         mark = "●" if m.connected else "○"
-        text = f"{mark} {m.base}"
+        text = f"{mark} {alias or m.base}"
         if m.egu:
             text += f" [{m.egu}]"
-        if m.desc:
+        if alias:
+            text += f"\n{m.base}"
+        elif m.desc:
             text += f"\n{m.desc}"
         hdr = QTableWidgetItem(text)
-        hdr.setToolTip(m.tooltip())
+        tip = m.tooltip()
+        if alias:
+            tip = f"{alias}\n{tip}"
+        hdr.setToolTip(tip + "\n\nDouble-click to rename column")
         hdr.setForeground(QColor("darkgreen") if m.connected else QColor("red"))
         self.table.setHorizontalHeaderItem(col, hdr)
 
@@ -364,38 +377,37 @@ class TableWidget(QWidget):
         finally:
             self._building = was
 
-    def _update_restore_colours(self, m: Motor) -> None:
-        """Colour the cells of the preset currently being restored."""
-        if self._restoring is None:
-            return
-        row = self._restoring + 1
-        if row >= self.table.rowCount():
-            self._restoring = None
-            return
+    def _recolour_column(self, m: Motor) -> None:
+        """
+        Colour every preset cell of this motor from the live readback:
+        green = at that value (within tolerance), yellow = moving toward it,
+        grey = motor disconnected, red = outside soft limits.
+        """
         col = self._motor_col(m)
-        target = self._restore_targets.get(col)
-        item = self.table.item(row, col)
-        if item is None or target is None:
-            return
-        if not m.connected:
-            self._set_bg(item, C_DISC)
-        elif m.moving:
-            self._set_bg(item, C_MOVING)
-        elif m.at_target(target, self._tol()):
-            self._set_bg(item, C_OK)
-        else:
-            self._set_bg(item, C_BAD)
-
-    def _clear_restore_colours(self) -> None:
-        if self._restoring is None:
-            return
-        row = self._restoring + 1
-        for col in range(FIRST_MOTOR_COL, FIRST_MOTOR_COL + len(self.motors)):
-            item = self.table.item(row, col)
-            if item is not None:
+        idx = col - FIRST_MOTOR_COL
+        target = self._move_targets.get(col)
+        tol = self._tol()
+        for r, p in enumerate(self.model.presets, start=1):
+            item = self.table.item(r, col)
+            if item is None:
+                continue
+            v = p.values[idx]
+            if v is None:
                 self._set_bg(item, C_NONE)
-        self._restoring = None
-        self._restore_targets = {}
+            elif not m.in_limits(v):
+                self._set_bg(item, C_BAD, "outside motor soft limits")
+            elif not m.connected:
+                self._set_bg(item, C_DISC)
+            elif m.moving and target is not None and abs(target - v) <= 1e-12:
+                self._set_bg(item, C_MOVING)
+            elif not m.moving and m.at_target(v, tol):
+                self._set_bg(item, C_OK)
+            else:
+                self._set_bg(item, C_NONE)
+
+    def _recolour_all(self) -> None:
+        for m in self.motors:
+            self._recolour_column(m)
 
     def _tol(self) -> typing.Optional[float]:
         t = self.model.tolerance
@@ -422,8 +434,6 @@ class TableWidget(QWidget):
             m = self._col_motor(col)
             if m is None:
                 return
-            if self._restoring == pidx:
-                self._clear_restore_colours()
             txt = item.text().strip()
             if txt == "":
                 p.values[col - FIRST_MOTOR_COL] = None
@@ -436,10 +446,7 @@ class TableWidget(QWidget):
                     return
                 p.values[col - FIRST_MOTOR_COL] = v
                 self._set_text_silent(item, m.fmt(v))
-            if not m.in_limits(p.values[col - FIRST_MOTOR_COL] or 0.0):
-                self._set_bg(item, C_BAD, "outside motor soft limits")
-            else:
-                self._set_bg(item, C_NONE, "")
+            self._recolour_column(m)
         p.saved = now_str()
         name_item = self.table.item(row, COL_NAME)
         if name_item is not None:
@@ -505,7 +512,6 @@ class TableWidget(QWidget):
         )
         if not ok or not name.strip():
             return
-        self._clear_restore_colours()
         self._append_preset(name.strip(), self._live_values())
         self.status.emit(f"Captured '{name.strip()}'")
 
@@ -526,12 +532,10 @@ class TableWidget(QWidget):
                 if v is not None:
                     p.values[k] = v
             p.saved = now_str()
-        self._clear_restore_colours()
         self._rebuild()
         self.changed.emit()
 
     def _on_new_row(self) -> None:
-        self._clear_restore_colours()
         self._append_preset(self.model.unique_preset_name(), [None] * len(self.motors))
 
     def _on_delete_preset(self) -> None:
@@ -541,7 +545,6 @@ class TableWidget(QWidget):
         names = ", ".join(self.model.presets[i].name for i in idxs)
         if QMessageBox.question(self, "Delete preset(s)", f"Delete: {names}?") != QMessageBox.Yes:
             return
-        self._clear_restore_colours()
         for i in reversed(idxs):
             self.model.remove_preset(i)
         self._rebuild()
@@ -551,7 +554,6 @@ class TableWidget(QWidget):
         dst = idx + delta
         if not (0 <= dst < len(self.model.presets)):
             return
-        self._clear_restore_colours()
         self.model.move_preset(idx, dst)
         self._rebuild()
         self.table.selectRow(dst + 1)
@@ -562,7 +564,6 @@ class TableWidget(QWidget):
         if not rows:
             self.status.emit("Clipboard has no values")
             return
-        self._clear_restore_colours()
         nm = len(self.motors)
         cur = self.table.currentItem()
         start_row = start_col = None
@@ -603,6 +604,28 @@ class TableWidget(QWidget):
 
     def _on_tol_changed(self, v: float) -> None:
         self.model.tolerance = None if v <= 0 else v
+        self._recolour_all()
+        self.changed.emit()
+
+    def _on_header_double_clicked(self, col: int) -> None:
+        self._rename_motor(col)
+
+    def _rename_motor(self, col: int) -> None:
+        m = self._col_motor(col)
+        if m is None:
+            return
+        idx = self.motors.index(m)
+        name, ok = QInputDialog.getText(
+            self,
+            "Rename column",
+            f"Friendly name for {m.base}\n(leave empty to show the PV name):",
+            text=self.model.aliases[idx] or "",
+        )
+        if not ok:
+            return
+        self.model.set_alias(idx, name)
+        self._update_header(m)
+        self.table.resizeColumnToContents(col)
         self.changed.emit()
 
     # -------------------------------------------------------- menus
@@ -612,6 +635,7 @@ class TableWidget(QWidget):
         if m is None:
             return
         menu = QMenu(self)
+        menu.addAction("Rename column...", lambda: self._rename_motor(col))
         menu.addAction(f"Copy PV name  ({m.base})", lambda: QApplication.clipboard().setText(m.base))
         menu.addAction("Reconnect", lambda: (m.disconnect(), m.connect()))
         menu.addSeparator()
@@ -626,7 +650,7 @@ class TableWidget(QWidget):
         menu = QMenu(self)
         if item is not None and item.row() != LIVE_ROW:
             idx = item.row() - 1
-            menu.addAction("Restore this preset", self._on_restore)
+            menu.addAction("Move to this preset", self._on_move)
             menu.addAction("Update from live", self._on_update_selected)
             menu.addSeparator()
             menu.addAction("Duplicate row", lambda: self._duplicate(idx))
@@ -646,106 +670,54 @@ class TableWidget(QWidget):
         self.changed.emit()
 
     def _copy_table(self) -> None:
-        lines = ["\t".join(["Preset"] + [m.base for m in self.motors] + ["Note"])]
+        lines = ["\t".join(["Preset"] + [self._label(m) for m in self.motors] + ["Note"])]
         for p in self.model.presets:
             lines.append("\t".join([p.name] + [("" if v is None else repr(v)) for v in p.values] + [p.note]))
         QApplication.clipboard().setText("\n".join(lines))
         self.status.emit("Table copied to clipboard")
 
-    # ================================================================ restore
-    def _on_restore(self) -> None:
+    # ================================================================ move
+    def _on_move(self) -> None:
         idxs = self._selected_preset_indices()
         if len(idxs) != 1:
-            self.status.emit("Select exactly one preset row to restore")
+            self.status.emit("Select exactly one preset row to move to")
             return
         idx = idxs[0]
         p = self.model.presets[idx]
 
-        plan = []  # (motor, target, ok, reason)
+        moves: list[tuple[Motor, float]] = []
+        skipped: list[str] = []
         for m, target in zip(self.motors, p.values):
             if target is None:
-                plan.append((m, None, False, "no value - skipped"))
-            elif not m.connected:
-                plan.append((m, target, False, "DISCONNECTED - skipped"))
+                continue  # empty cell: nothing to do, not worth a warning
+            label = self._label(m)
+            if not m.connected:
+                skipped.append(f"{label}: disconnected")
             elif not m.write_access:
-                plan.append((m, target, False, "no write access - skipped"))
+                skipped.append(f"{label}: no write access")
             elif not m.in_limits(target):
-                plan.append((m, target, False, "outside soft limits - skipped"))
+                skipped.append(f"{label}: {m.fmt(target)} outside soft limits {m.fmt(m.llm)}..{m.fmt(m.hlm)}")
             else:
-                plan.append((m, target, True, ""))
+                moves.append((m, target))
 
-        if not any(ok for _, _, ok, _ in plan):
-            QMessageBox.warning(self, "Restore", "Nothing to move: no connected motor has a valid target.")
-            return
-
-        dlg = RestoreDialog(p.name, plan, self._tol(), self)
-        if dlg.exec_() != QDialog.Accepted:
-            return
-
-        self._clear_restore_colours()
-        self._restoring = idx
-        self._restore_targets = {}
         n = 0
-        for m, target, ok, _ in plan:
-            if not ok:
-                continue
+        for m, target in moves:
             if m.move(target):
                 n += 1
-                self._restore_targets[self._motor_col(m)] = target
+                self._move_targets[self._motor_col(m)] = target
             else:
-                self.status.emit(f"put to {m.base}.VAL failed")
-        self.status.emit(f"Restoring '{p.name}': {n} motor(s) commanded")
-        for m in self.motors:
-            self._update_restore_colours(m)
-        # A motor that is already at its target never emits DMOV; recheck shortly.
-        QTimer.singleShot(500, lambda: [self._update_restore_colours(m) for m in self.motors])
+                skipped.append(f"{self._label(m)}: put to {m.base}.VAL failed")
+        self.status.emit(f"Moving to '{p.name}': {n} motor(s) commanded")
+        self._recolour_all()
+        # A motor already at its target never toggles DMOV; recheck shortly.
+        QTimer.singleShot(500, self._recolour_all)
 
-
-class RestoreDialog(QDialog):
-    """Confirmation dialog listing current vs target for every motor."""
-
-    def __init__(self, preset_name: str, plan, tol, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle(f"Restore '{preset_name}'?")
-        lay = QVBoxLayout(self)
-        lay.addWidget(QLabel(f"<b>Move motors to preset '{preset_name}'</b>"))
-        t = QTableWidget(len(plan), 6)
-        t.setHorizontalHeaderLabels(["Motor", "Description", "Current", "Target", "Delta", "Action"])
-        t.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        t.setSelectionMode(QAbstractItemView.NoSelection)
-        for r, (m, target, ok, reason) in enumerate(plan):
-            cur = m.readback
-            delta = None if (cur is None or target is None) else target - cur
-            cells = [
-                m.base,
-                m.desc,
-                m.fmt(cur),
-                m.fmt(target),
-                "" if delta is None else f"{delta:+.{m.prec}f}",
-                "MOVE" if ok else reason,
-            ]
-            for c, text in enumerate(cells):
-                item = QTableWidgetItem(text)
-                if c >= 2:
-                    item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
-                if ok:
-                    if delta is not None and abs(delta) <= (tol or m.tolerance):
-                        item.setBackground(C_OK)
-                else:
-                    item.setBackground(C_BAD if "DISCONNECTED" in reason or "limits" in reason else C_DISC)
-                t.setItem(r, c, item)
-        t.resizeColumnsToContents()
-        t.horizontalHeader().setStretchLastSection(True)
-        lay.addWidget(t)
-        skipped = sum(1 for _, _, ok, _ in plan if not ok)
         if skipped:
-            lay.addWidget(QLabel(f"<i>{skipped} motor(s) will be skipped.</i>"))
-        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        bb.button(QDialogButtonBox.Ok).setText("Move")
-        bb.accepted.connect(self.accept)
-        bb.rejected.connect(self.reject)
-        lay.addWidget(bb)
-        self.resize(max(600, t.horizontalHeader().length() + 60), 150 + 30 * len(plan))
+            QMessageBox.warning(
+                self,
+                "Some motors were not moved",
+                f"Moving to '{p.name}': {n} motor(s) commanded.\n\nSkipped:\n  " + "\n  ".join(skipped),
+            )
 
 
 def _is_number(s: typing.Optional[str]) -> bool:

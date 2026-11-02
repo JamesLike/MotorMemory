@@ -18,12 +18,12 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from PyQt5.QtCore import QTimer  # noqa: E402
-from PyQt5.QtWidgets import QApplication, QDialog, QMessageBox  # noqa: E402
+from PyQt5.QtWidgets import QApplication, QMessageBox  # noqa: E402
 
 import table_widget  # noqa: E402
 from main_window import MainWindow  # noqa: E402
 from presets_model import PresetStore, parse_pasted_values, parse_pv_names  # noqa: E402
-from table_widget import FIRST_MOTOR_COL, LIVE_ROW, C_OK  # noqa: E402
+from table_widget import FIRST_MOTOR_COL, LIVE_ROW, C_NONE, C_OK  # noqa: E402
 
 
 def spin(app, seconds):
@@ -97,13 +97,21 @@ def main():
         m.move(0.0)
     spin(app, 2.5)
 
-    # restore PosA (auto-accept dialog, auto-accept any QMessageBox)
-    table_widget.RestoreDialog.exec_ = lambda self: QDialog.Accepted
+    # "Home" row was captured at 0,0,0 => should be green now that motors are parked at 0
+    home_cols = [tw.table.item(1, FIRST_MOTOR_COL + i).background().color().name() for i in range(3)]
+    check(all(c == C_OK.name() for c in home_cols), f"row at live position is green {home_cols}")
+    posa_cols = [tw.table.item(2, FIRST_MOTOR_COL + i).background() for i in range(3)]
+    check(all(b.style() == C_NONE.style() for b in posa_cols), "row away from live position is uncoloured")
+
+    # move to PosA: no confirmation dialog; any warning popup would be a failure
+    warned = []
+    QMessageBox.warning = staticmethod(lambda *a, **k: warned.append(a))
     tw.table.clearSelection()
     tw.table.selectRow(2)
-    tw._on_restore()
+    tw._on_move()
     spin(app, 0.3)
-    check(any(m.moving for m in tw.motors), "motors moving after restore")
+    check(any(m.moving for m in tw.motors), "motors moving after move (no confirm)")
+    check(not warned, "no warning when all motors move")
     spin(app, 2.5)
     rb = [m.readback for m in tw.motors]
     check(
@@ -111,7 +119,23 @@ def main():
         f"motors reached PosA targets {rb}",
     )
     cols = [tw.table.item(2, FIRST_MOTOR_COL + i).background().color().name() for i in range(3)]
-    check(all(c == C_OK.name() for c in cols), f"restored cells coloured green {cols}")
+    check(all(c == C_OK.name() for c in cols), f"PosA cells now green {cols}")
+    home_cols = [tw.table.item(1, FIRST_MOTOR_COL + i).background() for i in range(3)]
+    check(all(b.style() == C_NONE.style() for b in home_cols), "Home row no longer green")
+
+    # out-of-limits value -> warning, other motors still move
+    tw.model.presets[2].values[0] = 500.0
+    tw._rebuild()
+    tw.table.selectRow(3)
+    tw._on_move()
+    spin(app, 0.3)
+    check(len(warned) == 1 and "soft limits" in warned[0][2], "warning popup for skipped motor")
+
+    # rename a column
+    table_widget.QInputDialog.getText = staticmethod(lambda *a, **k: ("Sample X", True))
+    tw._rename_motor(FIRST_MOTOR_COL)
+    hdr = tw.table.horizontalHeaderItem(FIRST_MOTOR_COL).text()
+    check("Sample X" in hdr and "SIM:MMS:01" in hdr, f"header shows alias and PV: {hdr!r}")
 
     # autosave then reload
     spin(app, 1.0)
@@ -120,15 +144,19 @@ def main():
     store2.load()
     check(
         store2.tables[0].motors == ["SIM:MMS:01", "SIM:MMS:02", "SIM:MMS:03"]
-        and [p.name for p in store2.tables[0].presets] == ["Home", "PosA", "Pasted"],
-        "reloaded file matches",
+        and [p.name for p in store2.tables[0].presets] == ["Home", "PosA", "Pasted"]
+        and store2.tables[0].aliases == ["Sample X", None, None],
+        "reloaded file matches (incl. alias)",
     )
 
     # remove motor column
     QMessageBox.question = staticmethod(lambda *a, **k: QMessageBox.Yes)
     tw._remove_motor(FIRST_MOTOR_COL + 1)
     spin(app, 0.2)
-    check(len(tw.motors) == 2 and all(len(p.values) == 2 for p in tw.model.presets), "remove motor column")
+    check(
+        len(tw.motors) == 2 and all(len(p.values) == 2 for p in tw.model.presets) and tw.model.aliases == ["Sample X", None],
+        "remove motor column keeps aliases aligned",
+    )
 
     # delete preset
     tw.table.clearSelection()

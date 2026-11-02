@@ -184,8 +184,9 @@ class MainWindow(QMainWindow):
             "2. <b>Capture current</b> adds a row with the live positions; "
             "<b>Paste values</b> adds rows from the clipboard "
             "(optionally with a name in the first column); or type values into cells.<br>"
-            "3. Select a row and press <b>Restore</b>; confirm the diff; "
-            "cells turn yellow while moving and green when within tolerance.<br><br>"
+            "3. Select a row and press <b>Move to selected</b>; motors move immediately. "
+            "Cells are green when the motor is at that value, yellow while moving toward it.<br><br>"
+            "Double-click a column header to give a motor a friendly name. "
             "Right-click a column header to move/remove a motor; right-click a row for more actions. "
             "Ctrl+V pastes into the table; Delete removes selected rows. Everything autosaves.",
         )

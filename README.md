@@ -26,13 +26,21 @@ experiment directory).
      motor cell is selected the paste starts there, otherwise rows are added.
    * **New empty row** then type into cells.
    * **Update selected from live** - overwrite a row with the readbacks.
-3. Select a row and press **Restore selected**. A confirmation dialog lists
-   motor / description / current / target / delta and which motors will be
-   skipped (empty value, disconnected, no write access, outside soft limits).
-   On **Move** all `.VAL` fields are written at once; the row's cells turn
-   yellow while `DMOV=0` and green once `|RBV - target| <= tolerance`.
-   Tolerance is the motor's `RDBD` (fallback 0.01) unless the per-table
-   **Tolerance** box is non-zero.
+3. Select a row and press **Move to selected**. All `.VAL` fields are written
+   at once with no confirmation. If some motor cannot be moved (disconnected,
+   no write access, value outside soft limits) the others still move and a
+   popup lists what was skipped.
+
+Cell colours are live on every row: **green** when the motor's readback is at
+that cell's value (within tolerance), **yellow** while moving toward it,
+grey if the motor is disconnected, red if the value is outside the soft
+limits. So the green row tells you which preset you are currently at.
+Tolerance is the motor's `RDBD` (fallback 0.01) unless the per-table
+**Tolerance** box is non-zero.
+
+Long PV names can be given a friendly name: double-click the column header
+(or right-click > Rename column). The header then shows the friendly name on
+the first line and the PV on the second.
 
 Right-click a column header to move/remove a motor; right-click a row to
 duplicate/move/delete it or copy the table as text. Double-click a LIVE cell to
@@ -72,8 +80,9 @@ backend in use is shown in the status bar at startup.
 {"version": 1, "tables": [
   {"name": "Sample stage",
    "motors": ["MFX:DG1:MMS:01", "MFX:DG1:MMS:02"],
+   "aliases": ["Sample X", null],
    "tolerance": null,
    "presets": [{"name": "Pos A", "values": [1.0, null], "note": "", "saved": "2026-11-02 10:12:00"}]}]}
 ```
 
-`null` means "no value for this motor"; it is skipped on restore.
+`null` in `values` means "no value for this motor" (skipped on move); `null` in `aliases` means "show the PV name".
