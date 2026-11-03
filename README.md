@@ -73,6 +73,7 @@ backend in use is shown in the status bar at startup.
 | `presets_model.py` | data model + atomic JSON persistence + paste parsers |
 | `sim_ioc.py` | caproto soft IOC with fake motors for testing |
 | `test_gui.py` | headless end-to-end test against the sim IOC |
+| `docs/MotorMemory-confluence.md` | user documentation (paste into Confluence via Insert > Markup > Markdown) |
 
 ## File format
 
