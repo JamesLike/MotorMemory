@@ -24,6 +24,7 @@ Options:
 |---|---|
 | `--file /path/to/presets.json` | Use a specific presets file (e.g. one shared by the experiment in its folder). Default: `~/.motormemory/presets.json` |
 | `MOTORMEMORY_FILE=/path/presets.json` (env var) | Same as `--file` |
+| `--hutch MFX` (or `MOTORMEMORY_HUTCH=MFX`) | Instrument for eLog posting. If omitted, taken from the first motor's PV prefix (`MFX:DG1:MMS:01` → MFX) |
 | `--style Fusion` | Qt widget style (default `Windows`, as camviewer) |
 
 The status bar at the bottom shows which EPICS library is in use (`CA backend: pyca` on the beamline). The window title shows the presets file path.
@@ -46,6 +47,7 @@ git clone git@github.com:JamesLike/MotorMemory.git
 - **Table** – row 0 is the pinned **LIVE** row (current readback of every motor). Rows below are presets.
 - **Buttons** – *Capture current*, *Update selected from live*, *Paste values*, *New empty row*, *Delete row(s)*, and **Move to selected**.
 - **Tolerance** – per-table settle tolerance (see *Colours*).
+- **Post to eLog** checkbox – log moves and preset changes to the experiment eLog (see below).
 
 Everything **autosaves** to the presets file about half a second after each edit. *Save now* (Ctrl+S) and *Reload from disk* are in the toolbar.
 
@@ -149,6 +151,24 @@ In the LIVE row, green = connected and stopped, yellow = moving, red = disconnec
 
 ---
 
+## Posting to the eLog
+
+Tick **Post to eLog** in the toolbar (the setting is remembered). MotorMemory then posts to the **current experiment's logbook** for the hutch, as the account it is running under (its Kerberos ticket, e.g. `mfxopr`). Posts are tagged `motormemory` plus the table name, so they are easy to filter.
+
+What gets posted:
+
+| Event | When | Content |
+|---|---|---|
+| **Move to selected** | Once every commanded motor has stopped (or after 60 s) | Title `MotorMemory: <table> → '<preset>'`; a table with motor, PV, from, target, final readback and *at target* / *OFF target* / *not settled*; skipped motors with the reason |
+| Capture current, Update from live, paste of new rows, duplicate / delete rows, add / remove motor columns, create / rename / delete tables | Immediately | The affected preset(s) and values (old → new for updates) |
+| Typed or pasted edits of values, preset names, notes, column names, tolerance | Grouped: one post per table once nothing has changed for 5 s | A list of *what / old / new* |
+
+Not posted: reordering rows or columns, rearranging panels, hiding/showing tables.
+
+Posting happens in the background so moves are never delayed. The status bar reports each post; the first failure also shows a popup. If the instrument cannot be determined (no motors yet and no `--hutch`), the status bar says so.
+
+If posts fail with an authentication error, the Kerberos ticket has expired: run `kinit` in a terminal on that machine (operator accounts normally renew automatically).
+
 ## Sharing presets with the experiment
 
 Presets live in one JSON file. To share with the whole shift, point everyone at a file in the experiment directory:
@@ -188,6 +208,8 @@ The file is plain JSON and can be edited or version-controlled:
 | Cell never turns green after a move | Motor stopped short of the target by more than the tolerance (check `RDBD`, backlash, or set a per-table tolerance). The LIVE row shows where it actually is. |
 | Values show with the wrong number of decimals | Display precision follows the motor's `PREC` field. The stored value is not rounded. |
 | A table has disappeared | It was hidden with its × button while docked: toolbar **Tables ▾** → tick it, or *Show all*. If a floating table is off-screen (e.g. monitor unplugged), press **Tile all** to bring everything back into the main window. |
+| "Post to eLog" is greyed out | The PCDS `elog` package is not importable in this environment (it is in pcds conda). Hover the checkbox for the reason. |
+| eLog post FAILED in status bar | Hover/see terminal for the error. HTTP 401 / Kerberos → run `kinit`. "hutch unknown" → start with `--hutch MFX` or add a motor first. |
 | Lost edits | Everything autosaves within ~0.5 s; check the window title for which file is in use. |
 
 Errors are also printed to the terminal MotorMemory was started from.
@@ -213,6 +235,7 @@ QT_QPA_PLATFORM=offscreen ./run_dev.sh ; python test_gui.py   # headless end-to-
 | `motor.py` | `Motor` QObject: motor-record fields → Qt signals |
 | `pv_backend.py` | pyca/psp or pyepics wrapper with a common API |
 | `presets_model.py` | data model, atomic JSON persistence, paste parsers |
+| `elog_poster.py` | eLog client wrapper (background thread) and post formatting |
 | `sim_ioc.py`, `test_gui.py` | fake motors and automated test |
 
 Bug reports and feature requests: open an issue at https://github.com/JamesLike/MotorMemory/issues or contact James Baxter (jb2717).

@@ -3,7 +3,7 @@
 MotorMemory - save and restore named motor positions.
 
 Usage:
-    motormemory.py [--file PRESETS.json]
+    motormemory.py [--file PRESETS.json] [--hutch MFX]
 
 Columns are EPICS motor records, rows are named positions.  See README.md.
 """
@@ -33,6 +33,11 @@ def main(argv=None) -> int:
         help=f"presets JSON file (default: $MOTORMEMORY_FILE or {DEFAULT_FILE})",
     )
     ap.add_argument("--style", default="Windows", help="Qt style (default: Windows, as camviewer)")
+    ap.add_argument(
+        "--hutch",
+        default=os.environ.get("MOTORMEMORY_HUTCH"),
+        help="instrument for eLog posting, e.g. MFX (default: $MOTORMEMORY_HUTCH, else derived from the motor PV prefix)",
+    )
     args = ap.parse_args(argv)
 
     app = QApplication(sys.argv[:1])
@@ -53,7 +58,7 @@ def main(argv=None) -> int:
         QMessageBox.critical(None, "Load failed", f"Could not read {args.file}:\n{exc}\n\nStarting empty.")
         store.tables = []
 
-    win = MainWindow(store)
+    win = MainWindow(store, hutch=args.hutch)
     win.show()
     rc = app.exec_()
     return rc

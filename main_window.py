@@ -15,6 +15,7 @@ import typing
 from PyQt5.QtCore import QSettings, Qt, QTimer
 from PyQt5.QtWidgets import (
     QAction,
+    QCheckBox,
     QDockWidget,
     QInputDialog,
     QMainWindow,
@@ -26,6 +27,7 @@ from PyQt5.QtWidgets import (
 )
 
 import pv_backend
+from elog_poster import ElogPoster, format_changes
 from presets_model import PresetStore, Table
 from table_widget import TableWidget
 
@@ -71,12 +73,27 @@ class TableDock(QDockWidget):
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, store: PresetStore, parent=None):
+    EDIT_BATCH_MS = 5000
+
+    def __init__(self, store: PresetStore, hutch: typing.Optional[str] = None, parent=None):
         super().__init__(parent)
         self.store = store
         self.setWindowTitle(f"MotorMemory - {os.path.abspath(store.path)}")
         self.docks: list[TableDock] = []
         self._active: typing.Optional[TableDock] = None
+
+        # eLog
+        self.elog = ElogPoster(hutch, self)
+        self.elog.posted.connect(lambda t: self.statusBar().showMessage(f"eLog: posted '{t}'", 5000))
+        self.elog.connected.connect(lambda d: self.statusBar().showMessage(f"eLog: connected to {d}", 5000))
+        self.elog.failed.connect(self._on_elog_failed)
+        self._elog_warned = False
+        # table uid -> list of (what, old, new) edits waiting to be posted
+        self._edit_batches: dict[str, list[list[str]]] = {}
+        self._edit_timer = QTimer(self)
+        self._edit_timer.setSingleShot(True)
+        self._edit_timer.setInterval(self.EDIT_BATCH_MS)
+        self._edit_timer.timeout.connect(self._flush_edits)
 
         # Docking behaviour: nested splits + tab groups, animated
         self.setDockOptions(
@@ -129,6 +146,20 @@ class MainWindow(QMainWindow):
         a.triggered.connect(self._reload)
         tb.addAction(a)
         tb.addSeparator()
+        self.elog_chk = QCheckBox("Post to eLog")
+        self.elog_chk.setToolTip(
+            "Post moves (after the motors settle) and preset/table changes to the experiment eLog.\n"
+            "Uses the Kerberos ticket of the account running MotorMemory."
+        )
+        if not self.elog.available:
+            self.elog_chk.setEnabled(False)
+            self.elog_chk.setToolTip(f"eLog posting unavailable: {self.elog.unavailable_reason}")
+        else:
+            self.elog_chk.setChecked(bool(QSettings(*SETTINGS).value("elog", False, type=bool)))
+        self.elog_chk.toggled.connect(self._on_elog_toggled)
+        self._on_elog_toggled(self.elog_chk.isChecked())
+        tb.addWidget(self.elog_chk)
+        tb.addSeparator()
         a = QAction("Help", self)
         a.triggered.connect(self._help)
         tb.addAction(a)
@@ -175,6 +206,11 @@ class MainWindow(QMainWindow):
         d.renameRequested = self._rename_table
         d.view.changed.connect(self._schedule_save)
         d.view.status.connect(lambda msg: self.statusBar().showMessage(msg, 5000))
+        d.view.logEvent.connect(lambda summary, headers, rows, d=d: self._post_event(d.model, summary, headers, rows))
+        d.view.edit.connect(lambda what, old, new, d=d: self._queue_edit(d.model, what, old, new))
+        d.view.movePost.connect(lambda title, body, d=d: self._post(title, body, d.model.name))
+        for base in table.motors:
+            self.elog.set_hutch_from_pv(base)
         d.visibilityChanged.connect(lambda vis, d=d: vis and self._set_active(d))
         d.view.table.itemSelectionChanged.connect(lambda d=d: self._set_active(d))
         d.view.pv_edit.textEdited.connect(lambda _t, d=d: self._set_active(d))
@@ -206,6 +242,7 @@ class MainWindow(QMainWindow):
         d.raise_()
         self._set_active(d)
         self._schedule_save()
+        self._post_event(t, "table created", [], [])
 
     def _rename_table(self, d: typing.Optional[TableDock]) -> None:
         if d is None:
@@ -213,9 +250,12 @@ class MainWindow(QMainWindow):
         name, ok = QInputDialog.getText(self, "Rename table", "Table name:", text=d.model.name)
         if not ok or not name.strip():
             return
+        old = d.model.name
         d.model.name = name.strip()
         d.setWindowTitle(d.model.name)
         self._schedule_save()
+        if d.model.name != old:
+            self._post_event(d.model, f"table renamed from '{old}'", [], [])
 
     def _delete_table(self) -> None:
         d = self._current_dock()
@@ -230,6 +270,9 @@ class MainWindow(QMainWindow):
             != QMessageBox.Yes
         ):
             return
+        rows = [[p.name] + [m.fmt(v) for m, v in zip(d.view.motors, p.values)] for p in d.model.presets]
+        headers = ["Preset"] + [d.model.label(i) for i in range(len(d.model.motors))]
+        self._post_event(d.model, f"table deleted ({len(d.model.presets)} presets)", headers, rows)
         self.removeDockWidget(d)
         self.docks.remove(d)
         d.view.shutdown()
@@ -293,6 +336,59 @@ class MainWindow(QMainWindow):
         self._populate()
         self.statusBar().showMessage("Reloaded", 3000)
 
+    # ------------------------------------------------------------ eLog
+    def _on_elog_toggled(self, on: bool) -> None:
+        self.elog.enabled = bool(on)
+        QSettings(*SETTINGS).setValue("elog", bool(on))
+        if on and self.elog.available:
+            if not self.elog.hutch:
+                for t in self.store.tables:
+                    for base in t.motors:
+                        self.elog.set_hutch_from_pv(base)
+            self.statusBar().showMessage(
+                f"eLog posting ON ({self.elog.hutch or 'hutch unknown - add a motor or use --hutch'})", 5000
+            )
+        elif not on:
+            self.statusBar().showMessage("eLog posting off", 3000)
+
+    def _post(self, title: str, body: str, table_name: str) -> None:
+        if not self.elog.hutch:
+            for t in self.store.tables:
+                for base in t.motors:
+                    self.elog.set_hutch_from_pv(base)
+        self.elog.post(title, body, [table_name.replace(" ", "_")])
+
+    def _post_event(self, table: Table, summary: str, headers: list, rows: list) -> None:
+        if not self.elog.enabled:
+            return
+        title, body = format_changes(table.name, summary, rows, headers)
+        self._post(title, body, table.name)
+
+    def _queue_edit(self, table: Table, what: str, old: str, new: str) -> None:
+        if not self.elog.enabled:
+            return
+        self._edit_batches.setdefault(table.uid, []).append([what, old, new])
+        self._edit_timer.start()
+
+    def _flush_edits(self) -> None:
+        batches, self._edit_batches = self._edit_batches, {}
+        by_uid = {t.uid: t for t in self.store.tables}
+        for uid, edits in batches.items():
+            t = by_uid.get(uid)
+            if t is None or not edits:
+                continue
+            n = len(edits)
+            title, body = format_changes(t.name, f"{n} edit{'s' if n != 1 else ''}", edits, ["What", "Old", "New"])
+            self._post(title, body, t.name)
+
+    def _on_elog_failed(self, title: str, err: str) -> None:
+        self.statusBar().showMessage(f"eLog post FAILED: {err}", 10000)
+        print(f"eLog post failed ('{title}'): {err}")
+        if not self._elog_warned:
+            self._elog_warned = True
+            hint = "\n\nIf this is an authentication error, run 'kinit' in a terminal." if "401" in err or "auth" in err.lower() or "kerberos" in err.lower() else ""
+            QMessageBox.warning(self, "eLog post failed", f"Could not post '{title}':\n{err}{hint}\n\nFurther failures are shown in the status bar only.")
+
     # ------------------------------------------------------------ saving
     def _schedule_save(self) -> None:
         self._save_timer.start()
@@ -311,6 +407,10 @@ class MainWindow(QMainWindow):
         settings = QSettings(*SETTINGS)
         settings.setValue("geometry", self.saveGeometry())
         settings.setValue("windowState", self.saveState())
+        if self._edit_timer.isActive():
+            self._edit_timer.stop()
+            self._flush_edits()
+        self.elog.shutdown()
         for d in self.docks:
             d.view.shutdown()
         super().closeEvent(event)
@@ -331,6 +431,9 @@ class MainWindow(QMainWindow):
             "or drop it beside another to tile them (closing a floating table re-docks it); <b>Tile all</b> / <b>Stack as tabs</b> rearrange "
             "everything; the <b>Tables</b> menu shows hidden ones. Double-click a title bar to rename. "
             "The layout is remembered.<br><br>"
+            "Tick <b>Post to eLog</b> to log every move (once the motors settle, with from/target/final) "
+            "and every preset or table change to the experiment eLog. Typed edits are grouped into one "
+            "post after a few seconds.<br><br>"
             "Double-click a column header to give a motor a friendly name. "
             "Right-click a column header to move/remove a motor; right-click a row for more actions. "
             "Ctrl+V pastes into the table; Delete removes selected rows. Everything autosaves.",

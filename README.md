@@ -50,11 +50,29 @@ Right-click a column header to move/remove a motor; right-click a row to
 duplicate/move/delete it or copy the table as text. Double-click a LIVE cell to
 copy its value. Delete key removes selected rows.
 
+## eLog posting
+
+Tick **Post to eLog** in the toolbar to log to the current experiment's eLog
+(uses the PCDS `elog` package and the Kerberos ticket of the account running
+MotorMemory, e.g. `mfxopr`):
+
+* every **move**, posted once the motors have settled, with from / target /
+  final readback per motor and any skipped motors (60 s timeout);
+* **Capture current**, **Update from live**, paste of new rows, duplicate /
+  delete rows, add / remove motor columns, create / rename / delete tables
+  (posted immediately);
+* typed or pasted **edits** (values, names, notes, column names, tolerance),
+  grouped into one post per table after 5 s without further changes.
+
+Tags: `motormemory` and the table name. The instrument comes from `--hutch MFX`
+(or `$MOTORMEMORY_HUTCH`), else from the first motor's PV prefix. Posting runs
+in the background; failures appear in the status bar (first one as a popup).
+
 ## Running
 
 ### Beamline (PCDS conda, pyca/psp backend - same env as camviewer)
 
-    ./run_motormemory.sh [--file /path/to/presets.json]
+    ./run_motormemory.sh [--file /path/to/presets.json] [--hutch MFX]
 
 ### S3DF development (ana conda, pyepics backend) with a fake IOC
 
@@ -75,6 +93,7 @@ backend in use is shown in the status bar at startup.
 | `motor.py` | `Motor` QObject: motor-record fields -> Qt signals |
 | `pv_backend.py` | pyca/psp or pyepics wrapper with a common API |
 | `presets_model.py` | data model + atomic JSON persistence + paste parsers |
+| `elog_poster.py` | eLog client wrapper (background thread) + post formatting |
 | `sim_ioc.py` | caproto soft IOC with fake motors for testing |
 | `test_gui.py` | headless end-to-end test against the sim IOC |
 | `docs/MotorMemory-confluence.md` | user documentation (paste into Confluence via Insert > Markup > Markdown) |

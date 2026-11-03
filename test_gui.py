@@ -55,9 +55,35 @@ def main():
     path = os.path.join(tmp, "presets.json")
     store = PresetStore(path)
     store.load()
-    win = MainWindow(store)
+    win = MainWindow(store, hutch="TST")
     win.show()
     tw = win.docks[0].view
+
+    # fake eLog client: records posts
+    posts = []
+
+    class FakeElog:
+        logbooks = {"experiment": "tstx12345"}
+
+        def __init__(self, hutch):
+            posts.append(("__login__", hutch))
+
+        def post(self, msg, tags=None, title=None, experiment=True, facility=False):
+            posts.append((title, msg, tags))
+
+    win.elog.available = True
+    win.elog._client_factory = FakeElog
+    win.EDIT_BATCH_MS = 1000
+    win._edit_timer.setInterval(1000)
+    win.elog_chk.setEnabled(True)
+    win.elog_chk.setChecked(True)
+    check(win.elog.enabled, "eLog checkbox enables posting")
+
+    def wait_posts(n, timeout=5.0):
+        end = time.time() + timeout
+        while time.time() < end and len([p for p in posts if p[0] != "__login__"]) < n:
+            spin(app, 0.05)
+        return [p for p in posts if p[0] != "__login__"]
 
     # add motors
     tw.pv_edit.setText("SIM:MMS:01 SIM:MMS:02.RBV SIM:MMS:03")
@@ -74,6 +100,12 @@ def main():
     tw._on_capture()
     spin(app, 0.2)
     check(len(tw.model.presets) == 1 and tw.model.presets[0].name == "Home", "capture current created preset")
+    got = wait_posts(2)  # 'added 3 motor columns' + 'captured'
+    check(
+        len(got) >= 2 and "captured 'Home'" in got[-1][0] and "SIM:MMS:01" in got[-1][1] and "motormemory" in got[-1][2],
+        f"capture posted to eLog ({[g[0] for g in got]})",
+    )
+    nposts = len(got)
 
     # paste values as new rows
     app.clipboard().setText("PosA\t1.5\t-2.0\t0.25\n2.0\t2.0\t2.0")
@@ -92,6 +124,17 @@ def main():
     item.setText("abc")
     spin(app, 0.2)
     check(tw.model.presets[1].values[2] == 0.5 and item.text() == "0.500", "invalid edit rejected")
+    item.setText("0.75")
+    spin(app, 0.1)
+    got = wait_posts(nposts + 2)  # paste post + one batched edit post
+    edit_posts = [g for g in got if "edit" in g[0]]
+    check(
+        len(edit_posts) == 1 and "0.500" in edit_posts[0][1] and "0.750" in edit_posts[0][1] and "0.250" in edit_posts[0][1],
+        f"typed edits batched into one eLog post ({[g[0] for g in got]})",
+    )
+    item.setText("0.5")
+    spin(app, 0.1)
+    nposts = len(wait_posts(len(got) + 1))
 
     # park motors away from PosA so the restore really moves them
     for m in tw.motors:
@@ -121,6 +164,13 @@ def main():
     )
     cols = [tw.table.item(2, FIRST_MOTOR_COL + i).background().color().name() for i in range(3)]
     check(all(c == C_OK.name() for c in cols), f"PosA cells now green {cols}")
+    got = wait_posts(nposts + 1)
+    mv = [g for g in got if "\u2192 'PosA'" in g[0]]
+    check(
+        len(mv) == 1 and "at target" in mv[0][1] and "0.000" in mv[0][1] and "1.500" in mv[0][1] and "Skipped" not in mv[0][1],
+        f"move posted after settle with from/target/final ({mv[0][0] if mv else None})",
+    )
+    nposts = len(got)
     home_cols = [tw.table.item(1, FIRST_MOTOR_COL + i).background() for i in range(3)]
     check(all(b.style() == C_NONE.style() for b in home_cols), "Home row no longer green")
 
@@ -131,6 +181,10 @@ def main():
     tw._on_move()
     spin(app, 0.3)
     check(len(warned) == 1 and "soft limits" in warned[0][2], "warning popup for skipped motor")
+    got = wait_posts(nposts + 1)
+    mv = [g for g in got if "\u2192 'Pasted'" in g[0]]
+    check(len(mv) == 1 and "Skipped" in mv[0][1] and "soft limits" in mv[0][1], "move post lists skipped motors")
+    nposts = len(got)
 
     # rename a column
     table_widget.QInputDialog.getText = staticmethod(lambda *a, **k: ("Sample X", True))
@@ -171,6 +225,8 @@ def main():
     win._new_table()
     spin(app, 0.2)
     check(len(win.docks) == 2 and win.docks[1].model.name == "Diode", "new table creates a dock")
+    got = wait_posts(nposts + 1)
+    check(any("Diode: table created" in g[0] for g in got), "table creation posted")
     win.docks[1].setFloating(True)
     spin(app, 0.2)
     check(win.docks[1].isFloating() and win.docks[1].view.motors == [], "dock can float")
@@ -201,6 +257,13 @@ def main():
     win._delete_table()
     spin(app, 0.1)
     check(len(win.docks) == 1 and all(t.uid != uid for t in store.tables), "delete table removes dock and model")
+    got = wait_posts(len(got) + 1)
+    check(any("Diode: table deleted" in g[0] for g in got), "table deletion posted")
+    win.elog_chk.setChecked(False)
+    n0 = len(got)
+    win._post_event(store.tables[0], "should not post", [], [])
+    spin(app, 0.5)
+    check(len(wait_posts(n0 + 1, 0.5)) == n0, "nothing posted when checkbox off")
 
     win.close()
     spin(app, 0.3)

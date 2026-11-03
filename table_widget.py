@@ -6,6 +6,7 @@ row showing the current readback of every motor.
 
 from __future__ import annotations
 
+import time
 import typing
 
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal
@@ -28,6 +29,7 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
+from elog_poster import format_move
 from motor import Motor
 from presets_model import Preset, Table, now_str, parse_pasted_values, parse_pv_names
 
@@ -65,6 +67,10 @@ class TableWidget(QWidget):
 
     changed = pyqtSignal()  # model modified -> main window saves
     status = pyqtSignal(str)
+    # eLog hooks (main window decides whether to post)
+    logEvent = pyqtSignal(str, list, list)  # summary, headers, rows -> immediate post
+    edit = pyqtSignal(str, str, str)  # what, old, new -> batched post
+    movePost = pyqtSignal(str, str)  # title, html -> immediate post
 
     def __init__(self, table: Table, parent: typing.Optional[QWidget] = None):
         super().__init__(parent)
@@ -72,6 +78,7 @@ class TableWidget(QWidget):
         self.motors: list[Motor] = []
         # column index -> target of an in-flight move (for the yellow highlight)
         self._move_targets: dict[int, float] = {}
+        self._pending_move: typing.Optional[dict] = None  # for the eLog post after settle
         self._building = False
 
         self._build_ui()
@@ -207,6 +214,7 @@ class TableWidget(QWidget):
             self._rebuild()
             self.changed.emit()
             self.status.emit(f"Added {added} motor(s); waiting for connection...")
+            self.logEvent.emit(f"added {added} motor column(s)", ["Motor PV"], [[n] for n in names if n in self.model.motors])
 
     def _remove_motor(self, col: int) -> None:
         m = self._col_motor(col)
@@ -222,12 +230,15 @@ class TableWidget(QWidget):
         ):
             return
         idx = self.motors.index(m)
+        label = self.model.label(idx)
+        vals = [[p.name, m.fmt(p.values[idx])] for p in self.model.presets]
         m.disconnect()
         m.deleteLater()
         del self.motors[idx]
         self.model.remove_motor(idx)
         self._rebuild()
         self.changed.emit()
+        self.logEvent.emit(f"removed motor column {label} ({m.base})", ["Preset", "Value removed"], vals)
 
     def _move_motor(self, col: int, delta: int) -> None:
         src = col - FIRST_MOTOR_COL
@@ -265,6 +276,8 @@ class TableWidget(QWidget):
             self._move_targets.pop(self._motor_col(m), None)
         self._update_live_cell(m)
         self._recolour_column(m)
+        if not moving:
+            self._check_move_settled()
 
     def _on_motor_info(self, m: Motor) -> None:
         if m not in self.motors:
@@ -425,27 +438,37 @@ class TableWidget(QWidget):
             return
         p = self.model.presets[pidx]
         if col == COL_NAME:
+            old = p.name
             p.name = item.text().strip() or p.name
             if item.text().strip() != p.name:
                 self._set_text_silent(item, p.name)
+            if p.name != old:
+                self.edit.emit("preset renamed", old, p.name)
         elif col == FIRST_MOTOR_COL + len(self.motors):
+            old = p.note
             p.note = item.text()
+            if p.note != old:
+                self.edit.emit(f"'{p.name}' note", old, p.note)
         else:
             m = self._col_motor(col)
             if m is None:
                 return
             txt = item.text().strip()
+            old = p.values[col - FIRST_MOTOR_COL]
             if txt == "":
                 p.values[col - FIRST_MOTOR_COL] = None
             else:
                 try:
                     v = float(txt)
                 except ValueError:
-                    self._set_text_silent(item, m.fmt(p.values[col - FIRST_MOTOR_COL]))
+                    self._set_text_silent(item, m.fmt(old))
                     self.status.emit(f"'{txt}' is not a number")
                     return
                 p.values[col - FIRST_MOTOR_COL] = v
                 self._set_text_silent(item, m.fmt(v))
+            new = p.values[col - FIRST_MOTOR_COL]
+            if new != old:
+                self.edit.emit(f"'{p.name}' / {self._label(m)}", m.fmt(old), m.fmt(new))
             self._recolour_column(m)
         p.saved = now_str()
         name_item = self.table.item(row, COL_NAME)
@@ -512,8 +535,14 @@ class TableWidget(QWidget):
         )
         if not ok or not name.strip():
             return
-        self._append_preset(name.strip(), self._live_values())
+        vals = self._live_values()
+        self._append_preset(name.strip(), vals)
         self.status.emit(f"Captured '{name.strip()}'")
+        self.logEvent.emit(
+            f"captured '{name.strip()}' from live positions",
+            ["Motor", "Value"],
+            [[self._label(m), m.fmt(v)] for m, v in zip(self.motors, vals)],
+        )
 
     def _on_update_selected(self) -> None:
         idxs = self._selected_preset_indices()
@@ -526,14 +555,20 @@ class TableWidget(QWidget):
         ):
             return
         live = self._live_values()
+        rows = []
         for i in idxs:
             p = self.model.presets[i]
             for k, v in enumerate(live):
                 if v is not None:
+                    m = self.motors[k]
+                    if p.values[k] != v:
+                        rows.append([p.name, self._label(m), m.fmt(p.values[k]), m.fmt(v)])
                     p.values[k] = v
             p.saved = now_str()
         self._rebuild()
         self.changed.emit()
+        names = ", ".join(self.model.presets[i].name for i in idxs)
+        self.logEvent.emit(f"updated '{names}' from live positions", ["Preset", "Motor", "Old", "New"], rows)
 
     def _on_new_row(self) -> None:
         self._append_preset(self.model.unique_preset_name(), [None] * len(self.motors))
@@ -545,10 +580,15 @@ class TableWidget(QWidget):
         names = ", ".join(self.model.presets[i].name for i in idxs)
         if QMessageBox.question(self, "Delete preset(s)", f"Delete: {names}?") != QMessageBox.Yes:
             return
+        rows = [self._preset_row(self.model.presets[i]) for i in idxs]
         for i in reversed(idxs):
             self.model.remove_preset(i)
         self._rebuild()
         self.changed.emit()
+        self.logEvent.emit(f"deleted preset(s) {names}", ["Preset"] + [self._label(m) for m in self.motors], rows)
+
+    def _preset_row(self, p: Preset) -> list[str]:
+        return [p.name] + [m.fmt(v) for m, v in zip(self.motors, p.values)]
 
     def _move_preset(self, idx: int, delta: int) -> None:
         dst = idx + delta
@@ -582,6 +622,11 @@ class TableWidget(QWidget):
             self._rebuild()
             self.changed.emit()
             self.status.emit(f"Added {len(rows)} preset row(s) from clipboard")
+            self.logEvent.emit(
+                f"pasted {len(rows)} preset row(s)",
+                ["Preset"] + [self._label(m) for m in self.motors],
+                [self._preset_row(p) for p in self.model.presets[-len(rows):]],
+            )
             return
 
         # Overwrite starting at the current cell; grow rows as required.
@@ -596,6 +641,9 @@ class TableWidget(QWidget):
             for k, v in enumerate(vals):
                 col = start_col + k
                 if col < nm and v is not None:
+                    if p.values[col] != v:
+                        m = self.motors[col]
+                        self.edit.emit(f"'{p.name}' / {self._label(m)}", m.fmt(p.values[col]), m.fmt(v))
                     p.values[col] = v
             p.saved = now_str()
         self._rebuild()
@@ -603,7 +651,10 @@ class TableWidget(QWidget):
         self.status.emit("Pasted values")
 
     def _on_tol_changed(self, v: float) -> None:
+        old = self.model.tolerance
         self.model.tolerance = None if v <= 0 else v
+        if self.model.tolerance != old:
+            self.edit.emit("tolerance", "RDBD" if old is None else f"{old:g}", "RDBD" if v <= 0 else f"{v:g}")
         self._recolour_all()
         self.changed.emit()
 
@@ -623,7 +674,10 @@ class TableWidget(QWidget):
         )
         if not ok:
             return
+        old = self.model.aliases[idx] or ""
         self.model.set_alias(idx, name)
+        if (self.model.aliases[idx] or "") != old:
+            self.edit.emit(f"column name for {m.base}", old, self.model.aliases[idx] or "")
         self._update_header(m)
         self.table.resizeColumnToContents(col)
         self.changed.emit()
@@ -665,7 +719,8 @@ class TableWidget(QWidget):
 
     def _duplicate(self, idx: int) -> None:
         p = self.model.presets[idx]
-        self.model.add_preset(self.model.unique_preset_name(p.name), list(p.values), p.note)
+        q = self.model.add_preset(self.model.unique_preset_name(p.name), list(p.values), p.note)
+        self.logEvent.emit(f"duplicated '{p.name}' as '{q.name}'", ["Preset"] + [self._label(m) for m in self.motors], [self._preset_row(q)])
         self._rebuild()
         self.changed.emit()
 
@@ -701,14 +756,21 @@ class TableWidget(QWidget):
                 moves.append((m, target))
 
         n = 0
+        commanded = []
         for m, target in moves:
+            frm = m.readback
             if m.move(target):
                 n += 1
                 self._move_targets[self._motor_col(m)] = target
+                commanded.append({"motor": m, "frm": frm, "target": target})
             else:
                 skipped.append(f"{self._label(m)}: put to {m.base}.VAL failed")
         self.status.emit(f"Moving to '{p.name}': {n} motor(s) commanded")
         self._recolour_all()
+        if commanded or skipped:
+            self._pending_move = {"preset": p.name, "rows": commanded, "skipped": list(skipped), "t0": time.time()}
+            # Motors already at target never toggle DMOV; also acts as timeout poll.
+            QTimer.singleShot(700, self._check_move_settled)
         # A motor already at its target never toggles DMOV; recheck shortly.
         QTimer.singleShot(500, self._recolour_all)
 
@@ -718,6 +780,43 @@ class TableWidget(QWidget):
                 "Some motors were not moved",
                 f"Moving to '{p.name}': {n} motor(s) commanded.\n\nSkipped:\n  " + "\n  ".join(skipped),
             )
+
+    MOVE_TIMEOUT = 60.0
+
+    def _check_move_settled(self) -> None:
+        """Post the pending move to the eLog once every commanded motor stopped."""
+        pm = self._pending_move
+        if pm is None:
+            return
+        age = time.time() - pm["t0"]
+        if age < 0.5:
+            QTimer.singleShot(600, self._check_move_settled)
+            return
+        still = [r for r in pm["rows"] if r["motor"].connected and r["motor"].moving]
+        if still and age < self.MOVE_TIMEOUT:
+            QTimer.singleShot(1000, self._check_move_settled)
+            return
+        self._pending_move = None
+        tol = self._tol()
+        rows = []
+        for r in pm["rows"]:
+            m = r["motor"]
+            if m.moving or not m.connected:
+                ok = None
+            else:
+                ok = m.at_target(r["target"], tol)
+            rows.append(
+                {
+                    "label": self._label(m),
+                    "pv": m.base,
+                    "frm": m.fmt(r["frm"]),
+                    "target": m.fmt(r["target"]),
+                    "final": m.fmt(m.readback) if m.connected else "disconnected",
+                    "ok": ok,
+                }
+            )
+        title, body = format_move(self.model.name, pm["preset"], rows, pm["skipped"], not still)
+        self.movePost.emit(title, body)
 
 
 def _is_number(s: typing.Optional[str]) -> bool:
