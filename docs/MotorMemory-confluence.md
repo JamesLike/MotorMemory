@@ -59,7 +59,7 @@ Each table is a dockable panel, like the panels in an IDE:
 - **Drop a table beside another** (left/right/above/below – watch for the blue drop indicator) to tile them so several tables are visible at once. Drag the splitter between them to resize.
 - **Drop a table on top of another** to put them in one tab group again.
 - **Tile all** lays every table out side by side in the main window; **Stack as tabs** puts them all back into one tab group.
-- The **×** on a panel hides it. Use **Tables ▾** in the toolbar to show it again (or *Show all*).
+- The **×** on a **floating** table returns it to the main window. The **×** on a **docked** table hides it; use **Tables ▾** in the toolbar to show it again (or *Show all*).
 
 The arrangement (which tables are floating, tiled, tabbed, hidden, and their sizes) is saved when you quit and restored next time, per user.
 
@@ -187,7 +187,7 @@ The file is plain JSON and can be edited or version-controlled:
 | Popup "Some motors were not moved" | Read the reasons listed: disconnected, no write access, outside soft limits, put failed. |
 | Cell never turns green after a move | Motor stopped short of the target by more than the tolerance (check `RDBD`, backlash, or set a per-table tolerance). The LIVE row shows where it actually is. |
 | Values show with the wrong number of decimals | Display precision follows the motor's `PREC` field. The stored value is not rounded. |
-| A table has disappeared | It was hidden with its × button: toolbar **Tables ▾** → tick it, or *Show all*. If a floating table is off-screen (e.g. monitor unplugged), press **Tile all** to bring everything back into the main window. |
+| A table has disappeared | It was hidden with its × button while docked: toolbar **Tables ▾** → tick it, or *Show all*. If a floating table is off-screen (e.g. monitor unplugged), press **Tile all** to bring everything back into the main window. |
 | Lost edits | Everything autosaves within ~0.5 s; check the window title for which file is in use. |
 
 Errors are also printed to the terminal MotorMemory was started from.

@@ -51,6 +51,17 @@ class TableDock(QDockWidget):
     def model(self) -> Table:
         return self.view.model
 
+    def closeEvent(self, event):
+        # Closing a floating panel returns it to the main window instead of
+        # hiding it; closing a docked panel hides it (Tables menu re-shows).
+        if self.isFloating():
+            event.ignore()
+            self.setFloating(False)
+            self.show()
+            self.raise_()
+            return
+        super().closeEvent(event)
+
     def mouseDoubleClickEvent(self, event):
         # Double-click on the title bar (not inside the table) -> rename
         if event.pos().y() < self.widget().geometry().top() and callable(self.renameRequested):
@@ -317,7 +328,7 @@ class MainWindow(QMainWindow):
             "3. Select a row and press <b>Move to selected</b>; motors move immediately. "
             "Cells are green when the motor is at that value, yellow while moving toward it.<br><br>"
             "<b>Tables</b> are dockable panels: drag a title bar to float a table as its own window "
-            "or drop it beside another to tile them; <b>Tile all</b> / <b>Stack as tabs</b> rearrange "
+            "or drop it beside another to tile them (closing a floating table re-docks it); <b>Tile all</b> / <b>Stack as tabs</b> rearrange "
             "everything; the <b>Tables</b> menu shows hidden ones. Double-click a title bar to rename. "
             "The layout is remembered.<br><br>"
             "Double-click a column header to give a motor a friendly name. "

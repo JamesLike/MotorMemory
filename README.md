@@ -10,7 +10,8 @@ Muscle memory for motors: a small PyQt5 tool to save and restore named motor pos
 * Several independent tables live in dockable panels (e.g. "Sample stage",
   "Diode"): tabbed by default, drag a title bar to float one as its own window
   (e.g. on a second monitor) or drop it next to another to tile them.
-  **Tile all** / **Stack as tabs** rearrange everything; the layout is remembered.
+  Closing a floating table returns it to the main window. **Tile all** /
+  **Stack as tabs** rearrange everything; the layout is remembered.
 
 Everything autosaves to a JSON file (default `~/.motormemory/presets.json`,
 override with `--file` or `$MOTORMEMORY_FILE`, e.g. to share a file in the
