@@ -21,6 +21,7 @@ from PyQt5.QtCore import QTimer  # noqa: E402
 from PyQt5.QtWidgets import QApplication, QMessageBox  # noqa: E402
 
 import table_widget  # noqa: E402
+import main_window  # noqa: E402
 from main_window import MainWindow  # noqa: E402
 from presets_model import PresetStore, parse_pasted_values, parse_pv_names  # noqa: E402
 from table_widget import FIRST_MOTOR_COL, LIVE_ROW, C_NONE, C_OK  # noqa: E402
@@ -56,7 +57,7 @@ def main():
     store.load()
     win = MainWindow(store)
     win.show()
-    tw = win.tabs.widget(0)
+    tw = win.docks[0].view
 
     # add motors
     tw.pv_edit.setText("SIM:MMS:01 SIM:MMS:02.RBV SIM:MMS:03")
@@ -165,8 +166,42 @@ def main():
     spin(app, 0.2)
     check([p.name for p in tw.model.presets] == ["PosA", "Pasted"], "delete preset row")
 
+    # dock layout: new table, float it, tile, tab, layout persistence
+    main_window.QInputDialog.getText = staticmethod(lambda *a, **k: ("Diode", True))
+    win._new_table()
+    spin(app, 0.2)
+    check(len(win.docks) == 2 and win.docks[1].model.name == "Diode", "new table creates a dock")
+    win.docks[1].setFloating(True)
+    spin(app, 0.2)
+    check(win.docks[1].isFloating() and win.docks[1].view.motors == [], "dock can float")
+    win._tile_all()
+    spin(app, 0.2)
+    check(all(not d.isFloating() and d.isVisible() for d in win.docks), "tile all docks everything")
+    check(len(win.tabifiedDockWidgets(win.docks[0])) == 0, "tiled docks are not tabbed")
+    win._tab_all()
+    spin(app, 0.2)
+    check(win.docks[1] in win.tabifiedDockWidgets(win.docks[0]), "stack as tabs re-tabs docks")
+    win.docks[1].close()
+    spin(app, 0.1)
+    check(not win.docks[1].isVisible(), "closing a dock hides it")
+    win._fill_view_menu()
+    acts = [a for a in win.view_menu.actions() if a.isCheckable()]
+    check([a.text() for a in acts] == ["Table 1", "Diode"] and [a.isChecked() for a in acts] == [True, False],
+          "Tables menu lists docks with visibility")
+    acts[1].setChecked(True)
+    spin(app, 0.1)
+    check(win.docks[1].isVisible(), "Tables menu re-shows a hidden dock")
+    uid = win.docks[1].model.uid
+    win._set_active(win.docks[1])
+    win._delete_table()
+    spin(app, 0.1)
+    check(len(win.docks) == 1 and all(t.uid != uid for t in store.tables), "delete table removes dock and model")
+
     win.close()
     spin(app, 0.3)
+    store3 = PresetStore(path)
+    store3.load()
+    check(store3.tables[0].uid == store.tables[0].uid, "table id persisted")
     print(f"\n{failures} failure(s)")
     QTimer.singleShot(0, app.quit)
     app.exec_()

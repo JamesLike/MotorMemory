@@ -28,6 +28,7 @@ import os
 import shutil
 import tempfile
 import typing
+import uuid
 
 DEFAULT_FILE = os.path.expanduser("~/.motormemory/presets.json")
 Number = typing.Optional[float]
@@ -76,8 +77,11 @@ class Table:
         presets: typing.Optional[list[Preset]] = None,
         tolerance: Number = None,
         aliases: typing.Optional[list[typing.Optional[str]]] = None,
+        uid: typing.Optional[str] = None,
     ):
         self.name = name
+        # Stable id used to remember window layout across renames
+        self.uid: str = uid or uuid.uuid4().hex[:12]
         self.motors: list[str] = list(motors or [])
         self.presets: list[Preset] = list(presets or [])
         self.tolerance: Number = tolerance  # None => use each motor's RDBD
@@ -156,6 +160,7 @@ class Table:
     def to_dict(self) -> dict:
         return {
             "name": self.name,
+            "id": self.uid,
             "motors": self.motors,
             "aliases": self.aliases,
             "tolerance": self.tolerance,
@@ -170,6 +175,7 @@ class Table:
             [Preset.from_dict(p) for p in d.get("presets", [])],
             _num(d.get("tolerance")),
             [(None if a in (None, "") else str(a)) for a in d.get("aliases", [])],
+            str(d["id"]) if d.get("id") else None,
         )
 
 

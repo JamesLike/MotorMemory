@@ -41,7 +41,7 @@ git clone git@github.com:JamesLike/MotorMemory.git
 
 ![screenshot placeholder: main window with two tables in tabs]
 
-- **Tabs** – one table per group of motors (e.g. "Sample stage", "Diode"). *New table*, *Rename table*, *Delete table* are in the toolbar; double-click a tab to rename it; drag tabs to reorder.
+- **Tables (dockable panels)** – one per group of motors (e.g. "Sample stage", "Diode"). They start as tabs. *New table*, *Rename table*, *Delete table* act on the table you last clicked in; double-click a panel's title bar to rename it.
 - **Motor PV bar** – where you add motors (columns).
 - **Table** – row 0 is the pinned **LIVE** row (current readback of every motor). Rows below are presets.
 - **Buttons** – *Capture current*, *Update selected from live*, *Paste values*, *New empty row*, *Delete row(s)*, and **Move to selected**.
@@ -50,6 +50,18 @@ git clone git@github.com:JamesLike/MotorMemory.git
 Everything **autosaves** to the presets file about half a second after each edit. *Save now* (Ctrl+S) and *Reload from disk* are in the toolbar.
 
 ---
+
+## Arranging tables
+
+Each table is a dockable panel, like the panels in an IDE:
+
+- **Drag the title bar** of a table out of the window to make it a free-floating window – e.g. put the sample-stage table on one monitor and camviewer on the other. Drag it back (or double-click its title bar area / use *Stack as tabs*) to re-dock.
+- **Drop a table beside another** (left/right/above/below – watch for the blue drop indicator) to tile them so several tables are visible at once. Drag the splitter between them to resize.
+- **Drop a table on top of another** to put them in one tab group again.
+- **Tile all** lays every table out side by side in the main window; **Stack as tabs** puts them all back into one tab group.
+- The **×** on a panel hides it. Use **Tables ▾** in the toolbar to show it again (or *Show all*).
+
+The arrangement (which tables are floating, tiled, tabbed, hidden, and their sizes) is saved when you quit and restored next time, per user.
 
 ## Step 1 – Add motors (columns)
 
@@ -153,6 +165,7 @@ The file is plain JSON and can be edited or version-controlled:
 {"version": 1, "tables": [
   {"name": "Sample stage",
    "motors": ["MFX:DG1:MMS:01", "MFX:DG1:MMS:02"],
+   "id": "3f2a9c1b7d4e",
    "aliases": ["Sample X", null],
    "tolerance": null,
    "presets": [
@@ -160,7 +173,7 @@ The file is plain JSON and can be edited or version-controlled:
    ]}]}
 ```
 
-`null` in `values` = no value for that motor; `null` in `aliases` = show the PV name; `"tolerance": null` = use RDBD.
+`id` is a stable identifier used to remember the table's window position. `null` in `values` = no value for that motor; `null` in `aliases` = show the PV name; `"tolerance": null` = use RDBD.
 
 ---
 
@@ -174,6 +187,7 @@ The file is plain JSON and can be edited or version-controlled:
 | Popup "Some motors were not moved" | Read the reasons listed: disconnected, no write access, outside soft limits, put failed. |
 | Cell never turns green after a move | Motor stopped short of the target by more than the tolerance (check `RDBD`, backlash, or set a per-table tolerance). The LIVE row shows where it actually is. |
 | Values show with the wrong number of decimals | Display precision follows the motor's `PREC` field. The stored value is not rounded. |
+| A table has disappeared | It was hidden with its × button: toolbar **Tables ▾** → tick it, or *Show all*. If a floating table is off-screen (e.g. monitor unplugged), press **Tile all** to bring everything back into the main window. |
 | Lost edits | Everything autosaves within ~0.5 s; check the window title for which file is in use. |
 
 Errors are also printed to the terminal MotorMemory was started from.
@@ -194,7 +208,7 @@ QT_QPA_PLATFORM=offscreen ./run_dev.sh ; python test_gui.py   # headless end-to-
 | File | Purpose |
 |---|---|
 | `motormemory.py` | entry point / argument parsing |
-| `main_window.py` | tabs, toolbar, autosave |
+| `main_window.py` | dockable table panels, toolbar, autosave, layout persistence |
 | `table_widget.py` | one table: motor columns, LIVE row, presets, paste, move |
 | `motor.py` | `Motor` QObject: motor-record fields → Qt signals |
 | `pv_backend.py` | pyca/psp or pyepics wrapper with a common API |

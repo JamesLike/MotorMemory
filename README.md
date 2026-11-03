@@ -7,7 +7,10 @@ Muscle memory for motors: a small PyQt5 tool to save and restore named motor pos
 * **Rows** are named presets, one coordinate per motor.
 * A pinned **LIVE** row shows the current readback (green = connected,
   yellow = moving, red = disconnected).
-* Several independent tables live in tabs (e.g. "Sample stage", "Diode").
+* Several independent tables live in dockable panels (e.g. "Sample stage",
+  "Diode"): tabbed by default, drag a title bar to float one as its own window
+  (e.g. on a second monitor) or drop it next to another to tile them.
+  **Tile all** / **Stack as tabs** rearrange everything; the layout is remembered.
 
 Everything autosaves to a JSON file (default `~/.motormemory/presets.json`,
 override with `--file` or `$MOTORMEMORY_FILE`, e.g. to share a file in the
@@ -81,9 +84,11 @@ backend in use is shown in the status bar at startup.
 {"version": 1, "tables": [
   {"name": "Sample stage",
    "motors": ["MFX:DG1:MMS:01", "MFX:DG1:MMS:02"],
+   "id": "3f2a9c1b7d4e",
    "aliases": ["Sample X", null],
    "tolerance": null,
    "presets": [{"name": "Pos A", "values": [1.0, null], "note": "", "saved": "2026-11-02 10:12:00"}]}]}
 ```
 
+`id` is a stable identifier used to remember each table's window position.
 `null` in `values` means "no value for this motor" (skipped on move); `null` in `aliases` means "show the PV name".
