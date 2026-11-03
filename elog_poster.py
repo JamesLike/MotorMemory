@@ -2,8 +2,12 @@
 Post MotorMemory events to the LCLS eLog.
 
 Uses the PCDS ``elog`` package (``elog.HutchELog``) that ships in the PCDS
-conda environment.  Authentication is Kerberos: posts appear as whoever's
-ticket is active on the machine (e.g. mfxopr on the control machine).
+conda environment.  Authentication mirrors hutch-python:
+
+1. ``HutchELog.from_conf(hutch)`` - HTTP basic auth with the credentials in
+   ``web.cfg`` / ``.web.cfg`` / ``~/.web.cfg`` (this is how the operator
+   accounts, e.g. mfxopr, post from hutch-python / autorun);
+2. otherwise ``HutchELog(hutch)`` - Kerberos ticket of the current user.
 
 All network traffic happens on a background thread; results are delivered
 through Qt signals so the GUI never blocks on the eLog server.
@@ -45,6 +49,7 @@ class ElogPoster(QObject):
         self.enabled = False
         self._client = None
         self._client_factory = None  # overridable for tests
+        self.auth_desc = ""
         self._queue: "queue.Queue[typing.Optional[tuple[str, str, list[str]]]]" = queue.Queue()
         self._thread: typing.Optional[threading.Thread] = None
         self.available, self.unavailable_reason = self._probe()
@@ -69,11 +74,38 @@ class ElogPoster(QObject):
             self.hutch = head
 
     def _make_client(self):
+        """Create the eLog client; sets self.auth_desc to describe how we logged in."""
         if self._client_factory is not None:
+            self.auth_desc = "test client"
             return self._client_factory(self.hutch)
+        import getpass
+        import os
+
         from elog import HutchELog
 
-        return HutchELog(self.hutch)
+        # 1. web.cfg credentials (same as hutch-python's elog object)
+        cfg_err = None
+        try:
+            client = HutchELog.from_conf(self.hutch)
+            user = getattr(getattr(client, "service", None), "_user", None) or "web.cfg user"
+            self.auth_desc = f"web.cfg as {user}"
+            return client
+        except (OSError, EnvironmentError) as exc:  # no config file / incomplete
+            cfg_err = str(exc)
+        except Exception as exc:  # config found but login failed
+            raise RuntimeError(f"web.cfg login failed: {exc}") from exc
+
+        # 2. Kerberos ticket of the current account
+        try:
+            client = HutchELog(self.hutch)
+        except Exception as exc:
+            raise RuntimeError(
+                f"no usable eLog credentials for {getpass.getuser()}: {cfg_err}; "
+                f"Kerberos failed: {exc}. Run 'kinit', or create "
+                f"{os.path.expanduser('~/.web.cfg')} with [DEFAULT] user= / pw="
+            ) from exc
+        self.auth_desc = f"kerberos as {getpass.getuser()}"
+        return client
 
     # ------------------------------------------------------------ posting
     def post(self, title: str, body_html: str, tags: typing.Optional[list[str]] = None) -> bool:
@@ -103,7 +135,7 @@ class ElogPoster(QObject):
                     self._client = self._make_client()
                     books = getattr(self._client, "logbooks", {}) or {}
                     exp = books.get("experiment")
-                    self.connected.emit(f"{self.hutch} eLog" + (f" ({exp})" if exp else ""))
+                    self.connected.emit(f"{self.hutch} eLog" + (f" ({exp})" if exp else "") + f" via {self.auth_desc}")
                 self._client.post(body, tags=tags, title=title, experiment=True, facility=False)
                 self.posted.emit(title)
             except Exception as exc:  # network / auth / anything

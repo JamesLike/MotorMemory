@@ -149,7 +149,7 @@ class MainWindow(QMainWindow):
         self.elog_chk = QCheckBox("Post to eLog")
         self.elog_chk.setToolTip(
             "Post moves (after the motors settle) and preset/table changes to the experiment eLog.\n"
-            "Uses the Kerberos ticket of the account running MotorMemory."
+            "Logs in with ~/.web.cfg if present (as hutch-python does), else this account's Kerberos ticket."
         )
         if not self.elog.available:
             self.elog_chk.setEnabled(False)
@@ -386,7 +386,12 @@ class MainWindow(QMainWindow):
         print(f"eLog post failed ('{title}'): {err}")
         if not self._elog_warned:
             self._elog_warned = True
-            hint = "\n\nIf this is an authentication error, run 'kinit' in a terminal." if "401" in err or "auth" in err.lower() or "kerberos" in err.lower() else ""
+            hint = ""
+            if any(k in err.lower() for k in ("401", "403", "auth", "kerberos", "credentials", "gss")):
+                hint = (
+                    "\n\nAuthentication: MotorMemory uses ~/.web.cfg ([DEFAULT] user= / pw=) if present, "
+                    "like hutch-python, otherwise the Kerberos ticket of this account (run 'kinit')."
+                )
             QMessageBox.warning(self, "eLog post failed", f"Could not post '{title}':\n{err}{hint}\n\nFurther failures are shown in the status bar only.")
 
     # ------------------------------------------------------------ saving

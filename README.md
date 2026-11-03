@@ -52,9 +52,10 @@ copy its value. Delete key removes selected rows.
 
 ## eLog posting
 
-Tick **Post to eLog** in the toolbar to log to the current experiment's eLog
-(uses the PCDS `elog` package and the Kerberos ticket of the account running
-MotorMemory, e.g. `mfxopr`):
+Tick **Post to eLog** in the toolbar to log to the current experiment's eLog.
+Login mirrors hutch-python: `~/.web.cfg` (`[DEFAULT] user= / pw=`, present for
+operator accounts such as `mfxopr`) if it exists, otherwise the Kerberos
+ticket of the account running MotorMemory. What gets posted:
 
 * every **move**, posted once the motors have settled, with from / target /
   final readback per motor and any skipped motors (60 s timeout);

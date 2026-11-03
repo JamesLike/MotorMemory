@@ -153,7 +153,9 @@ In the LIVE row, green = connected and stopped, yellow = moving, red = disconnec
 
 ## Posting to the eLog
 
-Tick **Post to eLog** in the toolbar (the setting is remembered). MotorMemory then posts to the **current experiment's logbook** for the hutch, as the account it is running under (its Kerberos ticket, e.g. `mfxopr`). Posts are tagged `motormemory` plus the table name, so they are easy to filter.
+Tick **Post to eLog** in the toolbar (the setting is remembered). MotorMemory then posts to the **current experiment's logbook** for the hutch. Posts are tagged `motormemory` plus the table name, so they are easy to filter.
+
+Login works the same way as hutch-python's `elog` object (used by `autorun`): if a `~/.web.cfg` file exists (`[DEFAULT]` section with `user=` and `pw=`; the operator accounts such as `mfxopr` have one) it is used, so posts appear exactly as autorun's do. Otherwise MotorMemory uses the Kerberos ticket of the account it runs under (fine for personal accounts after `kinit`). The status bar shows which was used on the first post, e.g. `eLog: connected to MFX eLog (mfxl1234567) via web.cfg as mfxopr`.
 
 What gets posted:
 
@@ -167,7 +169,7 @@ Not posted: reordering rows or columns, rearranging panels, hiding/showing table
 
 Posting happens in the background so moves are never delayed. The status bar reports each post; the first failure also shows a popup. If the instrument cannot be determined (no motors yet and no `--hutch`), the status bar says so.
 
-If posts fail with an authentication error, the Kerberos ticket has expired: run `kinit` in a terminal on that machine (operator accounts normally renew automatically).
+If posts fail with an authentication error: as an operator account, check that `~/.web.cfg` exists and the password in it is current (a wrong one gives HTTP 401); as a personal account, run `kinit` in a terminal on that machine.
 
 ## Sharing presets with the experiment
 
@@ -209,7 +211,7 @@ The file is plain JSON and can be edited or version-controlled:
 | Values show with the wrong number of decimals | Display precision follows the motor's `PREC` field. The stored value is not rounded. |
 | A table has disappeared | It was hidden with its × button while docked: toolbar **Tables ▾** → tick it, or *Show all*. If a floating table is off-screen (e.g. monitor unplugged), press **Tile all** to bring everything back into the main window. |
 | "Post to eLog" is greyed out | The PCDS `elog` package is not importable in this environment (it is in pcds conda). Hover the checkbox for the reason. |
-| eLog post FAILED in status bar | Hover/see terminal for the error. HTTP 401 / Kerberos → run `kinit`. "hutch unknown" → start with `--hutch MFX` or add a motor first. |
+| eLog post FAILED in status bar | See the terminal for the full error. `web.cfg login failed ... 401` → the password in `~/.web.cfg` is wrong/expired. `no usable eLog credentials` → no `~/.web.cfg` and no Kerberos ticket: run `kinit` or create the file. "hutch unknown" → start with `--hutch MFX` or add a motor first. |
 | Lost edits | Everything autosaves within ~0.5 s; check the window title for which file is in use. |
 
 Errors are also printed to the terminal MotorMemory was started from.
